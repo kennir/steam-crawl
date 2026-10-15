@@ -167,6 +167,7 @@ class HttpTests(unittest.TestCase):
     def response(body=b'{"ok": true}'):
         response = Mock()
         response.read.return_value = body
+        response.headers = {}
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         return response
@@ -212,6 +213,26 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)
         self.assertEqual(sleeps, [])
 
+    def test_final_503_with_extended_cooldown_pauses_service(self):
+        error = HTTPError("https://example.invalid", 503, "",
+                          {"Retry-After": "3600"}, None)
+        client, opener, sleeps = self.client([error], retries=0)
+        with self.assertRaises(SourceError):
+            client.get("store", appids=570)
+        with self.assertRaises(SourceError):
+            client.get("store", appids=730)
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(sleeps, [])
+
+    def test_final_503_retains_short_cooldown_for_next_app(self):
+        error = HTTPError("https://example.invalid", 503, "", {"Retry-After": "5"}, None)
+        client, opener, sleeps = self.client([error, self.response()], retries=0)
+        with self.assertRaises(SourceError):
+            client.get("store", appids=570)
+        self.assertEqual(client.get("store", appids=730), {"ok": True})
+        self.assertEqual(sleeps, [5])
+        self.assertEqual(opener.open.call_count, 2)
+
     def test_network_retries_are_bounded_and_json_is_validated(self):
         client, opener, _ = self.client([URLError("secret")] * 3)
         with self.assertRaises(SourceError) as caught:
@@ -239,6 +260,13 @@ class HttpTests(unittest.TestCase):
     def test_truncated_response_retries(self):
         from http.client import IncompleteRead
         client, opener, _ = self.client([IncompleteRead(b""), self.response()])
+        self.assertEqual(client.get("players", appid=570), {"ok": True})
+        self.assertEqual(opener.open.call_count, 2)
+
+    def test_short_content_length_body_retries(self):
+        response = self.response(b'{"ok":')
+        response.headers = {"Content-Length": "12"}
+        client, opener, _ = self.client([response, self.response()])
         self.assertEqual(client.get("players", appid=570), {"ok": True})
         self.assertEqual(opener.open.call_count, 2)
 

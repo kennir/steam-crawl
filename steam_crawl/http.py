@@ -3,7 +3,7 @@ import math
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from http.client import HTTPException
+from http.client import HTTPException, IncompleteRead
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -79,8 +79,16 @@ class Client:
             try:
                 with self.opener.open(request, timeout=self.timeout) as response:
                     body = response.read(10 * 1024 * 1024 + 1)
-                if len(body) > 10 * 1024 * 1024:
-                    raise SourceError(f"{source}: response too large")
+                    if len(body) > 10 * 1024 * 1024:
+                        raise SourceError(f"{source}: response too large")
+                    length = response.headers.get("Content-Length")
+                    if length is not None:
+                        try:
+                            expected = int(length)
+                        except (TypeError, ValueError):
+                            raise SourceError(f"{source}: invalid response length") from None
+                        if len(body) < expected:
+                            raise IncompleteRead(body, expected - len(body))
                 try:
                     data = json.loads(body)
                     json.dumps(data, allow_nan=False)
@@ -98,11 +106,16 @@ class Client:
                 ):
                     self.blocked.add(group)
                     raise SourceError(f"{source}: HTTP {status}; access paused") from None
-                if status not in (429, 500, 502, 503, 504) or attempt == self.retries:
+                if status not in (429, 500, 502, 503, 504):
                     raise SourceError(f"{source}: HTTP {status}") from None
+                self.next_request[group] = max(
+                    self.next_request[group], self.clock() + delay
+                )
                 if delay > 60:
                     self.blocked.add(group)
                     raise SourceError(f"{source}: server requested extended cooldown") from None
+                if attempt == self.retries:
+                    raise SourceError(f"{source}: HTTP {status}") from None
                 self.sleep(delay)
             except (URLError, TimeoutError, OSError, HTTPException):
                 if attempt == self.retries:
